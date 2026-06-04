@@ -1,3 +1,21 @@
+'''
+在测试脚本时会反复运行代码，直接使用主网的rest和ws地址容易导致IP被风控，我在测试脚本时就出现了这样的问题，踩坑后我改用了测试网地址，
+建议在测试时使用测试网的rest和ws地址，且主网和测试网的地址容易搞混，我找到了如下所示的地址，方便调试：
+
+1.基础主网rest接口：https://fapi.binance.com   btcusdt主网示例rest接口：https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=1000
+2.基础主网ws接口：wss://fstream.binance.com    btcusdt主网示例ws接口：wss://fstream.binance.com/ws/btcusdt@depth
+
+3.基础测试网rest接口：https://testnet.binancefuture.com     btcusdt测试网示例rest接口：https://testnet.binancefuture.com/fapi/v1/depth?symbol=BTCUSDT&limit=1000
+4.基础测试网ws接口：wss://stream.binancefuture.com          btcusdt测试网示例ws接口：wss://stream.binancefuture.com/ws/btcusdt@depth
+
+且我一开始出现了一个问题，搞了好久才解决，我在本地调试时使用ssh代理来访问数据，但源码中我直接硬编码了 "proxy_type": "socks5"，
+但socks5 模式：DNS 域名解析由代理服务器执行，socks5h 模式：DNS 域名解析由本地客户端执行，导致DNS无法解析公网域名，进而导致我在测试时虽然ws连接成功，但无法正常接收数据。
+
+原写法是硬编码"proxy_type": "socks5"
+我改成了proxy_type = "socks5h" if parsed.scheme == "socks5h" else "socks5"，"proxy_type": proxy_type
+这样就能让 DNS 解析在本地执行，避免代理服务器解析失败的问题。
+'''
+
 import json
 import queue 
 import threading # 用于 WebSocket 消息的线程安全队列
@@ -5,17 +23,22 @@ import time
 from dataclasses import dataclass, field
 
 import requests
-import websocket
+import websocket 
 import decimal
 
 SYMBOL = "btcusdt"
 SYMBOL_UPPER = SYMBOL.upper()
 DEPTH_LEVELS = 5  # 用于计算流动性指标时考虑的档位数量
-SNAPSHOT_URL = f"https://fapi.binance.com/fapi/v1/depth?symbol={SYMBOL_UPPER}&limit=1000" #全量快照接口
-WS_URL = f"wss://fstream.binance.com/ws/{SYMBOL}@depth" #增量更新接口，默认100档深度更新
+# 测试网rest地址
+SNAPSHOT_URL = f"https://testnet.binancefuture.com/fapi/v1/depth?symbol={SYMBOL_UPPER}&limit=1000"#全量快照接口
+# 测试网ws地址
+WS_URL = f"wss://stream.binancefuture.com/ws/{SYMBOL}@depth" #增量更新接口，默认100档深度更新（测试网WS端点不同）
+
 
 #我的ssh云服务器代理
 PROXY = "socks5h://127.0.0.1:1080"  
+
+DEBUG = True  # 开启调试日志
 
 # 本地订单簿数据结构，支持快照和增量更新的应用
 
@@ -135,14 +158,21 @@ def run() -> None:
         # 格式 socks5h://host:port 或 socks5://host:port
         from urllib.parse import urlparse #导入urlparse函数，用于解析代理URL
         parsed = urlparse(PROXY)
+        # websocket-client 的 SOCKS5 代理参数
+        # socks5h 表示 DNS 解析在客户端（本地），socks5 表示 DNS 解析在代理端
+        proxy_type = "socks5h" if parsed.scheme == "socks5h" else "socks5"
         ws_proxy_kwargs = {
-            "proxy_type": "socks5",
+            "proxy_type": proxy_type,
             "http_proxy_host": parsed.hostname,
             "http_proxy_port": parsed.port,
         }
+        print(f"使用代理: {proxy_type}://{parsed.hostname}:{parsed.port}")
 
     def on_message(ws_app, message): #WebSocket消息处理函数，当收到增量更新消息时被调用，参数为WebSocket应用对象和消息内容
-        msg_queue.put(json.loads(message))
+        parsed = json.loads(message)
+        if DEBUG:
+            print(f"收到消息: U={parsed.get('U')}, u={parsed.get('u')}, pu={parsed.get('pu')}")
+        msg_queue.put(parsed)
 
     def on_error(ws_app, error): #WebSocket错误处理函数，当WebSocket连接发生错误时被调用，参数为WebSocket应用对象和错误信息
         print(f"WS 错误: {error}")
@@ -150,14 +180,20 @@ def run() -> None:
     def on_open(ws_app): #WebSocket连接建立成功后的处理函数，当WebSocket连接成功建立时被调用，参数为WebSocket应用对象
         print("WebSocket 已连接")
 
+    def on_close(ws_app, close_status_code, close_msg): #WebSocket连接关闭处理函数
+        print(f"WS 连接关闭: code={close_status_code}, msg={close_msg}")
+
     ws_app = websocket.WebSocketApp( #创建一个WebSocket应用对象，参数包括连接URL和事件处理函数
         WS_URL,
         on_message=on_message,
         on_error=on_error,
         on_open=on_open,
+        on_close=on_close,
     )
 
     # 在后台线程运行 WebSocket
+    ws_proxy_kwargs['ping_interval'] = 30  # 每30秒发送ping
+    ws_proxy_kwargs['ping_timeout'] = 10   # ping超时10秒
     ws_thread = threading.Thread( #创建一个线程对象，参数包括目标函数、函数参数和是否为守护线程
         target=ws_app.run_forever, #目标函数是WebSocket应用对象的run_forever方法，用于持续运行WebSocket连接，函数参数包括ping_interval=30（每30秒发送一次ping消息保持连接活跃）和proxy参数（如果设置了代理，则传递相应的代理参数）
         kwargs=ws_proxy_kwargs, #传递WebSocket连接的代理参数，如果没有设置代理，则传递一个空字典
@@ -181,19 +217,29 @@ def run() -> None:
     while not msg_queue.empty(): #当消息队列不为空时，持续从队列中获取消息并存储在buffer列表中，直到队列为空为止
         buffer.append(msg_queue.get_nowait()) #从消息队列中获取一个消息，使用get_nowait方法，如果队列为空会抛出queue.Empty异常，这里不处理异常，因为循环条件已经检查了队列是否为空
 
+    if DEBUG:
+        print(f"缓存消息数: {len(buffer)}")
+    
     # 丢弃 u <= snap_id 的消息
     buffer = [m for m in buffer if m["u"] > snap_id] #使用列表推导式过滤掉那些版本号u小于等于快照版本号snap_id的消息，因为这些消息已经过时了，不需要应用到订单簿上了
+    
+    if DEBUG:
+        print(f"过滤后消息数: {len(buffer)}, snap_id={snap_id}")
+        for i, msg in enumerate(buffer[:5]):
+            print(f"  消息{i}: U={msg['U']}, u={msg['u']}")
 
     # 找第一条 U <= snap_id+1 <= u
     for msg in buffer: #遍历过滤后的消息列表，寻找第一条满足版本号连续性的消息，即U小于等于snap_id+1且u大于等于snap_id+1的消息，这样就可以确保从快照版本号开始，增量更新消息的版本号是连续的了
         if msg["U"] <= snap_id + 1 <= msg["u"]: #如果找到了满足条件的消息，就应用这条消息的增量更新数据到订单簿上，更新订单簿的版本号为这条消息的u，然后将last_u变量更新为这条消息的u，并将initialized标志设置为True，表示订单簿已经初始化完成了，最后跳出循环
+            if DEBUG:
+                print(f"找到对齐消息: U={msg['U']}, u={msg['u']}, snap_id+1={snap_id+1}")
             ob.apply_update(msg["b"], msg["a"], msg["u"]) #应用这条消息的增量更新数据到订单簿上，参数包括bids_diff、asks_diff和update_id，分别对应消息中的b、a和u字段
             last_u = msg["u"] #将last_u变量更新为这条消息的u字段，记录最后一次应用的增量消息的版本号
             initialized = True #将initialized标志设置为True，表示订单簿已经初始化完成了，可以开始应用后续的增量更新消息了
             break #跳出循环，不再继续寻找其他满足条件的消息了，因为已经找到了第一条满足条件的消息了
 
     if not initialized:
-        print("等待对齐消息...")
+        print(f"等待对齐消息... 需要 U <= {snap_id+1} <= u")
 
     # Step 3: 主循环持续消费队列
     while True:
