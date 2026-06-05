@@ -169,13 +169,13 @@ def run() -> None:
         print(f"使用代理: {proxy_type}://{parsed.hostname}:{parsed.port}")
 
     def on_message(ws_app, message): #WebSocket消息处理函数，当收到增量更新消息时被调用，参数为WebSocket应用对象和消息内容
-        parsed = json.loads(message)
+        parsed = json.loads(message) #将收到的消息内容从JSON字符串解析为一个Python字典对象，应该包含增量更新数据和版本号等信息
         if DEBUG:
             print(f"收到消息: U={parsed.get('U')}, u={parsed.get('u')}, pu={parsed.get('pu')}")
-        msg_queue.put(parsed)
+        msg_queue.put(parsed) #将解析后的消息对象放入消息队列中，供主线程消费和处理，这样就实现了WebSocket线程和主线程之间的消息传递了
 
     def on_error(ws_app, error): #WebSocket错误处理函数，当WebSocket连接发生错误时被调用，参数为WebSocket应用对象和错误信息
-        print(f"WS 错误: {error}")
+        print(f"WS 错误: {error}") #输出错误信息，提示用户WebSocket连接发生了错误，可能是网络问题、代理问题或者交易所服务器问题等导致的，可以根据具体的错误信息来排查和解决问题
 
     def on_open(ws_app): #WebSocket连接建立成功后的处理函数，当WebSocket连接成功建立时被调用，参数为WebSocket应用对象
         print("WebSocket 已连接")
@@ -185,12 +185,12 @@ def run() -> None:
 
     ws_app = websocket.WebSocketApp( #创建一个WebSocket应用对象，参数包括连接URL和事件处理函数
         WS_URL,
-        on_message=on_message,
-        on_error=on_error,
-        on_open=on_open,
-        on_close=on_close,
+        on_message=on_message, #当收到消息时调用on_message函数处理消息内容
+        on_error=on_error, #当发生错误时调用on_error函数处理错误信息
+        on_open=on_open, #当连接建立成功时调用on_open函数处理连接成功的事件
+        on_close=on_close, #当连接关闭时调用on_close函数处理连接关闭的事件，参数包括关闭状态码和关闭消息
     )
-
+    #发出 PING 之后，最多等待 10 秒收服务端 PONG 帧；超时没收到 → 判定链路坏死，立刻关闭 WS 连接、触发重连
     # 在后台线程运行 WebSocket
     ws_proxy_kwargs['ping_interval'] = 30  # 每30秒发送ping
     ws_proxy_kwargs['ping_timeout'] = 10   # ping超时10秒
@@ -207,9 +207,9 @@ def run() -> None:
 
     # Step 1: 拉取 REST 快照
     print("拉取订单簿快照...")
-    snapshot = fetch_snapshot()
-    ob.apply_snapshot(snapshot)
-    snap_id = ob.last_update_id
+    snapshot = fetch_snapshot() #调用fetch_snapshot函数从交易所拉取订单簿快照数据，返回一个字典对象，包含bids、asks和lastUpdateId等信息
+    ob.apply_snapshot(snapshot) #调用订单簿对象的apply_snapshot方法，将拉取到的快照数据应用到订单簿上，初始化订单簿的bids、asks和last_update_id等属性
+    snap_id = ob.last_update_id #记录快照的版本号，后续用于对齐增量更新消息的版本号，确保订单簿数据的一致性和正确性
     print(f"快照完毕，lastUpdateId={snap_id}，bids={len(ob.bids)}档，asks={len(ob.asks)}档")
 
     # Step 2: 处理队列中已缓存的消息，对齐版本号
@@ -217,7 +217,7 @@ def run() -> None:
     while not msg_queue.empty(): #当消息队列不为空时，持续从队列中获取消息并存储在buffer列表中，直到队列为空为止
         buffer.append(msg_queue.get_nowait()) #从消息队列中获取一个消息，使用get_nowait方法，如果队列为空会抛出queue.Empty异常，这里不处理异常，因为循环条件已经检查了队列是否为空
 
-    if DEBUG:
+    if DEBUG: 
         print(f"缓存消息数: {len(buffer)}")
     
     # 丢弃 u <= snap_id 的消息
